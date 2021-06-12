@@ -1,37 +1,39 @@
-/*
- * The MIT License (MIT)
- *
- * Copyright (c) 2018, hathach (tinyusb.org)
- *
- * Permission is hereby granted, free of charge, to any person obtaining a copy
- * of this software and associated documentation files (the "Software"), to deal
- * in the Software without restriction, including without limitation the rights
- * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
- * copies of the Software, and to permit persons to whom the Software is
- * furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included in
- * all copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
- * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
- * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
- * THE SOFTWARE.
- *
- * This file is part of the TinyUSB stack.
- */
+/* 
+* The MIT License (MIT)
+*
+* Copyright (c) 2018, hathach (tinyusb.org)
+* Copyright (c) 2021, HiFiPhile
+*
+* Permission is hereby granted, free of charge, to any person obtaining a copy
+* of this software and associated documentation files (the "Software"), to deal
+* in the Software without restriction, including without limitation the rights
+* to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+* copies of the Software, and to permit persons to whom the Software is
+* furnished to do so, subject to the following conditions:
+*
+* The above copyright notice and this permission notice shall be included in
+* all copies or substantial portions of the Software.
+*
+* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+* IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+* FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+* AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+* LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+* OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+* THE SOFTWARE.
+*
+* This file is part of the TinyUSB stack.
+*/
+
+
 
 #include "tusb_option.h"
 
-#if TUSB_OPT_DEVICE_ENABLED && CFG_TUSB_MCU == OPT_MCU_SAM3U
-
-/* sam cmsis */
-#include "sam.h"
+#if CFG_TUSB_MCU == OPT_MCU_SAME70
 
 #include "device/dcd.h"
+
+#include "sam.h"
 
 //--------------------------------------------------------------------+
 // MACRO TYPEDEF CONSTANT ENUM DECLARATION
@@ -40,18 +42,16 @@
 // Since TinyUSB doesn't use SOF for now, and this interrupt too often (1ms interval)
 // We disable SOF for now until needed later on
 #ifndef USE_SOF
-#  define USE_SOF         0
+#  define USE_SOF     0
 #endif
-
-/*
- * UDPHSEPT_NUMBER -> number of endpoints
- */
 
 #ifndef USBHS_RAM_ADDR
 #  define USBHS_RAM_ADDR        0xA0100000u
 #endif
 
 #define get_ep_fifo_ptr(ep, scale) (((TU_XSTRCAT(TU_STRCAT(uint, scale),_t) (*)[0x8000 / ((scale) / 8)])USBHS_RAM_ADDR)[(ep)])
+
+#define EP_MAX            10
 
 typedef struct {
   uint8_t * buffer;
@@ -61,7 +61,7 @@ typedef struct {
   uint8_t interval;
 } xfer_ctl_t;
 
-xfer_ctl_t xfer_status[UDPHSEPT_NUMBER+1];
+xfer_ctl_t xfer_status[EP_MAX+1];
 
 static const tusb_desc_endpoint_t ep0_desc =
 {
@@ -71,62 +71,57 @@ static const tusb_desc_endpoint_t ep0_desc =
 
 static tusb_speed_t get_speed(void);
 static void dcd_transmit_packet(xfer_ctl_t * xfer, uint8_t ep_ix);
+//------------------------------------------------------------------
+// Device API
+//------------------------------------------------------------------
 
-/*------------------------------------------------------------------*/
-/* Device API
- *------------------------------------------------------------------*/
-void dcd_init(uint8_t rhport)
+// Initialize controller to device mode
+void dcd_init (uint8_t rhport)
 {
-  (void) rhport;
-
-  /* Enable USBPLL */
+  // Enable USBPLL
   PMC->CKGR_UCKR = CKGR_UCKR_UPLLEN | CKGR_UCKR_UPLLCOUNT(0x3fU);
-  /* Wait until UTMI PLL is locked */
-  while(!(PMC->PMC_SR & PMC_SR_LOCKU));
-
+  // Wait until USB UTMI stabilize
+  while (!(PMC->PMC_SR & PMC_SR_LOCKU));
+  // Enable USB FS clk
+  PMC->PMC_USB = PMC_USB_USBS | PMC_USB_USBDIV(10 - 1);
+  PMC->PMC_SCER = PMC_SCER_USBCLK;
   dcd_connect(rhport);
 }
 
-void dcd_int_enable(uint8_t rhport)
+// Enable device interrupt
+void dcd_int_enable (uint8_t rhport)
 {
   (void) rhport;
-
-  NVIC_EnableIRQ(UDPHS_IRQn);
+  NVIC_EnableIRQ((IRQn_Type) ID_USBHS);
 }
 
-void dcd_int_disable(uint8_t rhport)
+// Disable device interrupt
+void dcd_int_disable (uint8_t rhport)
 {
   (void) rhport;
-
-  NVIC_DisableIRQ(UDPHS_IRQn);
+  NVIC_DisableIRQ((IRQn_Type) ID_USBHS);
 }
 
-void dcd_set_address(uint8_t rhport, uint8_t dev_addr)
+// Receive Set Address request, mcu port must also include status IN response
+void dcd_set_address (uint8_t rhport, uint8_t dev_addr)
 {
-  (void) dev_addr;
-
-  /*
-   * DCD can only set address after status for this request is complete
-   * do it at dcd_edpt0_status_complete()
-   */
-
-  /* Respond with zlp status */
+  // DCD can only set address after status for this request is complete
+  // do it at dcd_edpt0_status_complete()
+  
+  // Response with zlp status
   dcd_edpt_xfer(rhport, tu_edpt_addr(0, TUSB_DIR_IN), NULL, 0);
 }
 
-void dcd_remote_wakeup(uint8_t rhport)
+// Wake up host
+void dcd_remote_wakeup (uint8_t rhport)
 {
   (void) rhport;
-
-  USBHS->UDPHS_CTRL |= UDPHS_CTRL_REWAKEUP;
+  USBHS->USBHS_DEVCTRL |= USBHS_DEVCTRL_RMWKUP;
 }
 
 // Connect by enabling internal pull-up resistor on D+/D-
 void dcd_connect(uint8_t rhport)
 {
-  (void) rhport;
-
-  /* TODO
   uint32_t irq_state = __get_PRIMASK();
   __disable_irq();
   // Enable USB clock
@@ -151,14 +146,12 @@ void dcd_connect(uint8_t rhport)
   // Freeze USB clock
   USBHS->USBHS_CTRL |= USBHS_CTRL_FRZCLK;
   __set_PRIMASK(irq_state);
-  */
 }
 
 // Disconnect by disabling internal pull-up resistor on D+/D-
 void dcd_disconnect(uint8_t rhport)
 {
   (void) rhport;
-  /* TODO:
   uint32_t irq_state = __get_PRIMASK();
   __disable_irq();
   // Disable all endpoints
@@ -176,20 +169,23 @@ void dcd_disconnect(uint8_t rhport)
   // Disable the device address
   USBHS->USBHS_DEVCTRL &=~(USBHS_DEVCTRL_ADDEN | USBHS_DEVCTRL_UADD_Msk);
   __set_PRIMASK(irq_state);
-  */
 }
 
 static tusb_speed_t get_speed(void)
 {
-  if(UDPHS->UDPHS_INTSTA & UDPHS_INTSTA_SPEED)
-	return TUSB_SPEED_HIGH;
-  else
+  switch ((USBHS->USBHS_SR & USBHS_SR_SPEED_Msk) >> USBHS_SR_SPEED_Pos) {
+  case USBHS_SR_SPEED_FULL_SPEED_Val:
+  default:
     return TUSB_SPEED_FULL;
+  case USBHS_SR_SPEED_HIGH_SPEED_Val:
+    return TUSB_SPEED_HIGH;
+  case USBHS_SR_SPEED_LOW_SPEED_Val:
+    return TUSB_SPEED_LOW;
+  }
 }
 
 static void dcd_ep_handler(uint8_t ep_ix)
 {
-	/*
   uint32_t int_status = USBHS->USBHS_DEVEPTISR[ep_ix];
   int_status &= USBHS->USBHS_DEVEPTIMR[ep_ix];
   uint16_t count = (USBHS->USBHS_DEVEPTISR[ep_ix] &
@@ -227,7 +223,7 @@ static void dcd_ep_handler(uint8_t ep_ix)
     if (int_status & USBHS_DEVEPTISR_TXINI) {
       // Disable the interrupt 
       USBHS->USBHS_DEVEPTIDR[0] = USBHS_DEVEPTIDR_TXINEC;
-      xfer_ctl_t * xfer = &xfer_status[UDPHSEPT_NUMBER];
+      xfer_ctl_t * xfer = &xfer_status[EP_MAX];
       if ((xfer->total_len != xfer->queued_len)) {
         // TX not complete 
         dcd_transmit_packet(xfer, 0);
@@ -272,12 +268,10 @@ static void dcd_ep_handler(uint8_t ep_ix)
       }
     }
   }
-  */
 }
 
 void dcd_int_handler(uint8_t rhport)
 {
-	/*
   (void) rhport;
   uint32_t int_status = USBHS->USBHS_DEVISR;
   // End of reset interrupt 
@@ -286,7 +280,7 @@ void dcd_int_handler(uint8_t rhport)
     USBHS->USBHS_CTRL &= ~USBHS_CTRL_FRZCLK;
     while(USBHS_SR_CLKUSABLE != (USBHS->USBHS_SR & USBHS_SR_CLKUSABLE));
     // Reset all endpoints
-    for (int ep_ix = 1; ep_ix < UDPHSEPT_NUMBER; ep_ix++) {
+    for (int ep_ix = 1; ep_ix < EP_MAX; ep_ix++) {
       USBHS->USBHS_DEVEPT |= 1 << (USBHS_DEVEPT_EPRST0_Pos + ep_ix);
       USBHS->USBHS_DEVEPT &=~(1 << (USBHS_DEVEPT_EPRST0_Pos + ep_ix));
     }
@@ -342,38 +336,36 @@ void dcd_int_handler(uint8_t rhport)
   }
 #endif 
   // Endpoints interrupt 
-  for (int ep_ix = 0; ep_ix < UDPHSEPT_NUMBER; ep_ix++) {
+  for (int ep_ix = 0; ep_ix < EP_MAX; ep_ix++) {
     if (int_status & (1 << (USBHS_DEVISR_PEP_0_Pos + ep_ix))) {
       dcd_ep_handler(ep_ix);
     }
-  }*/
+  }
 }
 
 //--------------------------------------------------------------------+
 // Endpoint API
 //--------------------------------------------------------------------+
-
 // Invoked when a control transfer's status stage is complete.
 // May help DCD to prepare for next control transfer, this API is optional.
 void dcd_edpt0_status_complete(uint8_t rhport, tusb_control_request_t const * request)
 {
   (void) rhport;
 
-  if(request->bmRequestType_bit.recipient == TUSB_REQ_RCPT_DEVICE &&
-     request->bmRequestType_bit.type == TUSB_REQ_TYPE_STANDARD &&
-     request->bRequest == TUSB_REQ_SET_ADDRESS )
+  if (request->bmRequestType_bit.recipient == TUSB_REQ_RCPT_DEVICE &&
+      request->bmRequestType_bit.type == TUSB_REQ_TYPE_STANDARD &&
+      request->bRequest == TUSB_REQ_SET_ADDRESS )
   {
-    uint8_t const dev_addr = (uint8_t)equest->wValue;
-
-    UDPHS->UDPHS_CTRL |= UDPHS_CTRL_DEV_ADDR(dev_addr) | UDPHS_CTRL_FADDR_EN;
+    uint8_t const dev_addr = (uint8_t) request->wValue;
+    
+    USBHS->USBHS_DEVCTRL |= dev_addr | USBHS_DEVCTRL_ADDEN;
   }
 }
 
 // Configure endpoint's registers according to descriptor
-bool dcd_edpt_open(uint8_t rhport, tusb_desc_endpoint_t const * ep_desc)
+bool dcd_edpt_open (uint8_t rhport, tusb_desc_endpoint_t const * ep_desc)
 {
   (void) rhport;
-  /*
   uint8_t const epnum = tu_edpt_number(ep_desc->bEndpointAddress);
   uint8_t const dir   = tu_edpt_dir(ep_desc->bEndpointAddress);
   uint16_t const epMaxPktSize = ep_desc->wMaxPacketSize.size;
@@ -393,7 +385,7 @@ bool dcd_edpt_open(uint8_t rhport, tusb_desc_endpoint_t const * ep_desc)
   USBHS->USBHS_DEVEPT &=~(1 << (USBHS_DEVEPT_EPRST0_Pos + epnum));
     
   if (epnum == 0) {
-    xfer_status[UDPHSEPT_NUMBER].max_packet_size = epMaxPktSize;
+    xfer_status[EP_MAX].max_packet_size = epMaxPktSize;
     // Enable the control endpoint - Endpoint 0 
     USBHS->USBHS_DEVEPT |= USBHS_DEVEPT_EPEN0;
     // Configure the Endpoint 0 configuration register 
@@ -451,12 +443,10 @@ bool dcd_edpt_open(uint8_t rhport, tusb_desc_endpoint_t const * ep_desc)
       return false;
     }
   }
-  */
 }
 
 static void dcd_transmit_packet(xfer_ctl_t * xfer, uint8_t ep_ix)
 {
-/*
   uint16_t len = (uint16_t)(xfer->total_len - xfer->queued_len);
   
   if (len > xfer->max_packet_size) {
@@ -478,13 +468,11 @@ static void dcd_transmit_packet(xfer_ctl_t * xfer, uint8_t ep_ix)
     // Other endpoint types: clear the FIFO control flag to send the data.
     USBHS->USBHS_DEVEPTIDR[ep_ix] = USBHS_DEVEPTIDR_FIFOCONC;
   }
-  */
 }
 
 // Submit a transfer, When complete dcd_event_xfer_complete() is invoked to notify the stack
-bool dcd_edpt_xfer(uint8_t rhport, uint8_t ep_addr, uint8_t * buffer, uint16_t total_bytes)
+bool dcd_edpt_xfer (uint8_t rhport, uint8_t ep_addr, uint8_t * buffer, uint16_t total_bytes)
 {
-	/*
   (void) rhport;
   
   uint8_t const epnum = tu_edpt_number(ep_addr);
@@ -492,7 +480,7 @@ bool dcd_edpt_xfer(uint8_t rhport, uint8_t ep_addr, uint8_t * buffer, uint16_t t
   
   xfer_ctl_t * xfer = &xfer_status[epnum];
   if(ep_addr == 0x80)
-    xfer = &xfer_status[UDPHSEPT_NUMBER];
+    xfer = &xfer_status[EP_MAX];
   
   xfer->buffer = buffer;
   xfer->total_len = total_bytes;
@@ -505,27 +493,23 @@ bool dcd_edpt_xfer(uint8_t rhport, uint8_t ep_addr, uint8_t * buffer, uint16_t t
     dcd_transmit_packet(xfer,epnum);
   }
   return true;
-  */
 }
 
-void dcd_edpt_stall(uint8_t rhport, uint8_t ep_addr)
+// Stall endpoint
+void dcd_edpt_stall (uint8_t rhport, uint8_t ep_addr)
 {
   (void) rhport;
-
   uint8_t const epnum = tu_edpt_number(ep_addr);
-  /* enable request STALL */
-  UDPHS->UDPHS_EPT[epnum].UDPHS_EPTSETSTA = UDPHS_EPTSETSTA_FRCESTALL;
+  USBHS->USBHS_DEVEPTIER[epnum] = USBHS_DEVEPTIER_STALLRQS;
 }
 
-void dcd_edpt_clear_stall(uint8_t rhport, uint8_t ep_addr)
+// clear stall, data toggle is also reset to DATA0
+void dcd_edpt_clear_stall (uint8_t rhport, uint8_t ep_addr)
 {
   (void) rhport;
-
   uint8_t const epnum = tu_edpt_number(ep_addr);
-  /* clear STALL request */
-  UDPHS->UDPHS_EPT[epnum].UDPHS_EPTCLRSTA = UDPHS_EPTCLRSTA_FRCESTALL;
-  /* clear the PID data of the current bank */
-  UDPHS->UDPHS_EPT[epnum].UDPHS_EPTCLRSTA = UDPHS_EPTCLRSTA_TOGGLESQ;
+  USBHS->USBHS_DEVEPTIDR[epnum] = USBHS_DEVEPTIDR_STALLRQC;
+  USBHS->USBHS_DEVEPTIER[epnum] = USBHS_HSTPIPIER_RSTDTS;
 }
 
 #endif
